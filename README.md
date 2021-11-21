@@ -37,3 +37,15 @@ This example uses IaC with CloudFormation to create simple pipeline which execut
 ## Diagram
 
 ![Diagram](ci-security-pipeline-diagram.png)
+
+## How to create the Pipeline
+
+__Assumption__ AWS CLI is installed and configured
+
+In order to create the stack, run the command
+
+`aws cloudformation create-stack --stack-name ci-security --template-body file://Codepipeline.yml --capabilities CAPABILITY_IAM`
+
+If your AWS CLI config has profiles, run the same command and specify the profile
+
+`aws --profile demo cloudformation create-stack --stack-name ci-security --template-body file://Codepipeline.yml --capabilities CAPABILITY_IAM`
