@@ -1,0 +1,232 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: CI for Terraform security
+
+Resources:
+  artifactsBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+
+  buildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - codebuild.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: '/'
+      Policies:
+      - PolicyName: buildPolicy
+        PolicyDocument:
+          Statement:
+          - Effect: Allow
+            Action: '*'
+            Resource: '*'
+          Version: '2012-10-17'
+
+  securityRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - codepipeline.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: "/"
+      Policies:
+      - PolicyName: ciSecurityPolicy
+        PolicyDocument:
+          Statement:
+          - Effect: Allow
+            Action:
+            - codecommit:*
+            - codebuild:*
+            - s3:*
+            - cloudformation:*
+            Resource: "*"
+          Version: '2012-10-17'
+
+  SecurityPipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties: 
+      RoleArn: !GetAtt securityRole.Arn
+      ArtifactStore:
+        Type: S3
+        Location: !Ref artifactsBucket
+      Stages:
+        - Name: PullSource
+          Actions:
+          - InputArtifacts: []
+            Name: GetSource
+            ActionTypeId:
+              Category: Source
+              Owner: AWS
+              Version: 1
+              Provider: CodeCommit
+            OutputArtifacts:
+            - Name: templatesOutput
+            Configuration:
+              RepositoryName: ci-security
+              BranchName: master
+              PollForSourceChanges: false
+            RunOrder: 1
+
+        - Name: tests
+          Actions:
+          - Name: Checkov
+            ActionTypeId:
+              Category: Test
+              Owner: AWS
+              Version: 1
+              Provider: CodeBuild
+            InputArtifacts:
+            - Name: templatesOutput
+            RunOrder: 1
+            Configuration:
+              ProjectName: !Ref testCheckov
+          - Name: TFSec
+            ActionTypeId:
+              Category: Test
+              Owner: AWS
+              Version: 1
+              Provider: CodeBuild
+            InputArtifacts:
+            - Name: templatesOutput
+            RunOrder: 1
+            Configuration:
+              ProjectName: !Ref testTfsec
+          - Name: Terrascan
+            ActionTypeId:
+              Category: Test
+              Owner: AWS
+              Version: 1
+              Provider: CodeBuild
+            InputArtifacts:
+            - Name: templatesOutput
+            RunOrder: 1
+            Configuration:
+              ProjectName: !Ref testTerrascan
+        
+  testCheckov:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: testCheckov
+      Description: Tests
+      ServiceRole: !GetAtt buildRole.Arn
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/amazonlinux2-x86_64-standard:3.0
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: !Sub |
+          version: 0.2
+          env:
+            shell: bash
+          phases:
+            install:
+              runtime-versions:
+                python: 3.8
+              commands:
+                - pip install checkov
+                - mkdir reports
+            build:
+              commands:
+                - checkov -d . -o junitxml > reports/checkov.xml
+          reports:
+            testCheckov:
+              files:
+                - '**/*'
+              base-directory: 'reports'
+              discard-paths: false
+              file-format: JUNITXML
+      TimeoutInMinutes: 5
+
+  testTfsec:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: testTfsec
+      Description: Tests
+      ServiceRole: !GetAtt buildRole.Arn
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/amazonlinux2-x86_64-standard:3.0
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: !Sub |
+          version: 0.2
+          env:
+            shell: bash
+          phases:
+            install:
+              runtime-versions:
+                python: 3.8
+              commands:
+                - mkdir reports
+                - wget https://github.com/aquasecurity/tfsec/releases/download/v0.60.0/tfsec-linux-amd64
+                - mv tfsec-linux-amd64 tfsec
+                - chmod +x tfsec
+                - install tfsec /usr/local/bin && rm tfsec
+            build:
+              commands:
+                - tfsec . --format junit --out reports/tfsec.xml
+          reports:
+            testTfsec:
+              files:
+                - '**/*'
+              base-directory: 'reports'
+              discard-paths: false
+              file-format: JUNITXML
+      TimeoutInMinutes: 5
+
+  testTerrascan:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: testTerrascan
+      Description: Tests
+      ServiceRole: !GetAtt buildRole.Arn
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/amazonlinux2-x86_64-standard:3.0
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: !Sub |
+          version: 0.2
+          env:
+            shell: bash
+          phases:
+            install:
+              runtime-versions:
+                python: 3.8
+              commands:
+                - mkdir reports
+                - wget https://github.com/accurics/terrascan/releases/download/v1.12.0/terrascan_1.12.0_Linux_x86_64.tar.gz
+                - tar -xzvf terrascan_1.12.0_Linux_x86_64.tar.gz terrascan 
+                - rm terrascan_1.12.0_Linux_x86_64.tar.gz
+                - install terrascan /usr/local/bin 
+                - rm terrascan
+            build:
+              commands:
+                - terrascan scan -o junit-xml > reports/terrascan.xml
+          reports:
+            testTerrascan:
+              files:
+                - '**/*'
+              base-directory: 'reports'
+              discard-paths: false
+              file-format: JUNITXML
+      TimeoutInMinutes: 5
